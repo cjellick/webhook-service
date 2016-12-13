@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/Sirupsen/logrus"
 	jwt "github.com/dgrijalva/jwt-go"
+	"github.com/gorilla/mux"
 	"github.com/pborman/uuid"
 	"github.com/rancher/go-rancher/api"
 	"github.com/rancher/go-rancher/v2"
@@ -23,6 +24,7 @@ type RancherClientFactory interface {
 func (rh *RouteHandler) ConstructPayload(w http.ResponseWriter, r *http.Request) (int, error) {
 	apiContext := api.GetApiContext(r)
 	webhookRequestData := make(map[string]interface{})
+	userData := make(map[string]interface{})
 	var url string
 	logrus.Infof("Construct Payload")
 	bytes, err := ioutil.ReadAll(r.Body)
@@ -30,6 +32,8 @@ func (rh *RouteHandler) ConstructPayload(w http.ResponseWriter, r *http.Request)
 		return 500, err
 	}
 	json.Unmarshal(bytes, &webhookRequestData)
+	json.Unmarshal(bytes, &userData)
+
 	accountID := r.Header.Get("X-API-Project-Id")
 	if accountID == "" {
 		return 500, fmt.Errorf("Project ID not obtained from cattle")
@@ -49,18 +53,27 @@ func (rh *RouteHandler) ConstructPayload(w http.ResponseWriter, r *http.Request)
 	if driver == nil {
 		return 400, fmt.Errorf("Driver %s is not registered", driverID)
 	}
+
+	configName := driverID + "Config"
+	config, ok := webhookRequestData[configName].(map[string]interface{})
+	if !ok {
+		return 400, fmt.Errorf("Config %s not provided for driver %s", configName, driverID)
+	}
+	userConfig := userData[configName].(map[string]interface{})
+
 	apiClient, err := rh.rcf.GetClient(accountID)
 	if err != nil {
 		return 500, err
 	}
-	code, err := driver.ValidatePayload(webhookRequestData, apiClient)
+	code, err := driver.ValidatePayload(config, apiClient)
 	if err != nil {
 		return code, err
 	}
-	webhookRequestData["projectId"] = accountID
+	config["projectId"] = accountID
 	uuid := uuid.New()
-	webhookRequestData["uuid"] = uuid
-	jwt, err := util.CreateTokenWithPayload(webhookRequestData, PrivateKey)
+	config["uuid"] = uuid
+	config["driver"] = driverID
+	jwt, err := util.CreateTokenWithPayload(config, PrivateKey)
 	if err != nil {
 		return 500, err
 	}
@@ -68,12 +81,14 @@ func (rh *RouteHandler) ConstructPayload(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return 400, fmt.Errorf("Name not provided")
 	}
-	err = saveWebhook(uuid, name, apiClient)
+	jwt = url + jwt
+
+	webhook, err := saveWebhook(uuid, name, driverID, jwt, userConfig, apiClient)
 	if err != nil {
 		return 500, err
 	}
-	jwt = url + jwt
-	apiContext.WriteResource(newGeneratedWebhook(apiContext, jwt))
+	fmt.Printf("driver : %v\n", driver)
+	apiContext.WriteResource(newWebhook(apiContext, jwt, webhook.Links, webhook.Id, driverID, name, userConfig))
 	return 200, nil
 }
 
@@ -124,6 +139,74 @@ func (rh *RouteHandler) Execute(w http.ResponseWriter, r *http.Request) (int, er
 	return 200, nil
 }
 
+func (rh *RouteHandler) ListWebhooks(w http.ResponseWriter, r *http.Request) (int, error) {
+	apiContext := api.GetApiContext(r)
+	projectID := r.Header.Get("X-API-Project-Id")
+	if projectID == "" {
+		return 500, fmt.Errorf("Project ID not obtained from cattle")
+	}
+	apiClient, err := rh.rcf.GetClient(projectID)
+	if err != nil {
+		return 500, err
+	}
+	webhooks, err := apiClient.Webhook.List(&client.ListOpts{})
+	response := []webhook{}
+	for _, webhook := range webhooks.Data {
+		respWebhook := newWebhook(apiContext, webhook.Url, webhook.Links, webhook.Id, webhook.Driver, webhook.Name, webhook.Config.(map[string]interface{}))
+		response = append(response, *respWebhook)
+	}
+	apiContext.Write(&webhookCollection{Data: response})
+	return 200, nil
+}
+
+func (rh *RouteHandler) GetWebhook(w http.ResponseWriter, r *http.Request) (int, error) {
+	apiContext := api.GetApiContext(r)
+	vars := mux.Vars(r)
+	webhookID := vars["id"]
+	projectID := r.Header.Get("X-API-Project-Id")
+	if projectID == "" {
+		return 500, fmt.Errorf("Project ID not obtained from cattle")
+	}
+	apiClient, err := rh.rcf.GetClient(projectID)
+	if err != nil {
+		return 500, err
+	}
+	webhook, err := apiClient.Webhook.ById(webhookID)
+	if err != nil {
+		return 500, err
+	}
+	if webhook.Removed == "Revoked" {
+		fmt.Printf("webhook : %v\n", webhook)
+		return 400, nil
+	}
+	respWebhook := newWebhook(apiContext, webhook.Url, webhook.Links, webhook.Id, webhook.Driver, webhook.Name, webhook.Config.(map[string]interface{}))
+	apiContext.WriteResource(respWebhook)
+	return 200, nil
+}
+
+func (rh *RouteHandler) DeleteWebhook(w http.ResponseWriter, r *http.Request) (int, error) {
+	vars := mux.Vars(r)
+	webhookID := vars["id"]
+	projectID := r.Header.Get("X-API-Project-Id")
+	if projectID == "" {
+		return 500, fmt.Errorf("Project ID not obtained from cattle")
+	}
+	apiClient, err := rh.rcf.GetClient(projectID)
+	if err != nil {
+		return 500, err
+	}
+	webhook, err := apiClient.Webhook.ById(webhookID)
+	if err != nil {
+		return 500, err
+	}
+
+	err = apiClient.Webhook.Delete(webhook)
+	if err != nil {
+		return 500, err
+	}
+	return 200, nil
+}
+
 func (e *ExecuteStruct) GetClient(projectID string) (client.RancherClient, error) {
 	config := config.GetConfig()
 	url := fmt.Sprintf("%s/projects/%s/schemas", config.CattleURL, projectID)
@@ -139,24 +222,25 @@ func (e *ExecuteStruct) GetClient(projectID string) (client.RancherClient, error
 	return *apiClient, nil
 }
 
-func saveWebhook(uuid string, name string, apiClient client.RancherClient) error {
-	_, err := apiClient.GenericObject.Create(&client.GenericObject{
-		Kind: "webhookToken",
-		Name: name,
-		Key:  uuid,
+func saveWebhook(uuid string, name string, driver string, url string, input map[string]interface{}, apiClient client.RancherClient) (*client.Webhook, error) {
+	webhook, err := apiClient.Webhook.Create(&client.Webhook{
+		Name:   name,
+		Key:    uuid,
+		Url:    url,
+		Config: input,
+		Driver: driver,
 	})
 
 	if err != nil {
-		return fmt.Errorf("Failed to create webhook : %v", err)
+		return &client.Webhook{}, fmt.Errorf("Failed to create webhook : %v", err)
 	}
-	return nil
+	return webhook, nil
 }
 
 func validateWebhook(uuid string, apiClient client.RancherClient) (int, error) {
 	filters := make(map[string]interface{})
 	filters["key"] = uuid
-	filters["kind"] = "webhookToken"
-	webhookCollection, err := apiClient.GenericObject.List(&client.ListOpts{
+	webhookCollection, err := apiClient.Webhook.List(&client.ListOpts{
 		Filters: filters,
 	})
 	if err != nil {
