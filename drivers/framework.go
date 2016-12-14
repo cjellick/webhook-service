@@ -9,8 +9,8 @@ var Drivers map[string]WebhookDriver
 
 //WebhookDriver interface for all drivers
 type WebhookDriver interface {
-	ValidatePayload(input map[string]interface{}, apiClient client.RancherClient) (int, error)
-	Execute(payload map[string]interface{}, apiClient client.RancherClient) (int, error)
+	ValidatePayload(input interface{}, apiClient client.RancherClient) (int, error)
+	Execute(payload interface{}, apiClient client.RancherClient) (int, error)
 	GetSchema() interface{}
 }
 

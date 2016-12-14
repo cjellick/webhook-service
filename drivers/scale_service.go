@@ -14,8 +14,9 @@ type ScaleService struct {
 	ScaleAction string  `json:"action,omitempty"`
 }
 
-func (s *ScaleService) ValidatePayload(input map[string]interface{}, apiClient client.RancherClient) (int, error) {
-	action, ok := input["action"].(string)
+func (s *ScaleService) ValidatePayload(input interface{}, apiClient client.RancherClient) (int, error) {
+	sc, ok := input.(ScaleService)
+action, ok := input["action"].(string)
 	if !ok {
 		return http.StatusBadRequest, fmt.Errorf("Scale action of type string not provided")
 	}

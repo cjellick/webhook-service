@@ -75,14 +75,12 @@ type ServerAPIError struct {
 	Message string `json:"message"`
 }
 
-type ScaleServiceConfig drivers.ScaleService
-
 type webhook struct {
 	client.Resource
 	URL                string                 `json:"url"`
 	Driver             string                 `json:"driver"`
 	Name               string                 `json:"name"`
-	ScaleServiceConfig map[string]interface{} `json:"scaleServiceConfig"`
+	ScaleServiceConfig drivers.ScaleService           `json:"scaleServiceConfig"`
 }
 
 type webhookCollection struct {
@@ -104,7 +102,7 @@ func newWebhook(context *api.ApiContext, url string, links map[string]string, id
 	ConfigName := driver + "Config"
 	switch ConfigName {
 	case "scaleServiceConfig":
-		webhook.ScaleServiceConfig = userConfig
+		webhook.ScaleServiceConfig = userConfig.(drivers.ScaleService) // add the "ok" logic
 	}
 
 	return webhook

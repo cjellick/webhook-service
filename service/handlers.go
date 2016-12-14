@@ -31,7 +31,9 @@ func (rh *RouteHandler) ConstructPayload(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return 500, err
 	}
-	json.Unmarshal(bytes, &webhookRequestData)
+	wh := &webhook{}
+	json.Unmarshal(bytes, wh)
+	wh.ScaleServiceConfig
 	json.Unmarshal(bytes, &userData)
 
 	accountID := r.Header.Get("X-API-Project-Id")
@@ -165,7 +167,7 @@ func (rh *RouteHandler) GetWebhook(w http.ResponseWriter, r *http.Request) (int,
 	webhookID := vars["id"]
 	projectID := r.Header.Get("X-API-Project-Id")
 	if projectID == "" {
-		return 500, fmt.Errorf("Project ID not obtained from cattle")
+		return 400, fmt.Errorf("Project ID not obtained from cattle")
 	}
 	apiClient, err := rh.rcf.GetClient(projectID)
 	if err != nil {
